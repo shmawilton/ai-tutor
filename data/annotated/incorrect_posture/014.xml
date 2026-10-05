@@ -1,0 +1,37 @@
+<annotation>
+	<folder>my-project-name</folder>
+	<filename>014.jpg</filename>
+	<path>/my-project-name/014.jpg</path>
+	<source>
+		<database>Unspecified</database>
+	</source>
+	<size>
+		<width>3468</width>
+		<height>4624</height>
+		<depth>3</depth>
+	</size>
+	<object>
+		<name>flute</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>1985</xmin>
+			<ymin>2669</ymin>
+			<xmax>2618</xmax>
+			<ymax>4624</ymax>
+		</bndbox>
+	</object>
+	<object>
+		<name>person</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>639</xmin>
+			<ymin>1173</ymin>
+			<xmax>3342</xmax>
+			<ymax>4612</ymax>
+		</bndbox>
+	</object>
+</annotation>

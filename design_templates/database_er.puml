@@ -1,0 +1,105 @@
+@startuml Flute Learning Database ER
+
+' Style settings
+skinparam class {
+    BackgroundColor White
+    ArrowColor #2c3e50
+    BorderColor #2c3e50
+}
+
+' User Authentication
+entity "User" as user {
+    + user_id <<PK>>
+    --
+    username <<unique>>
+    email <<unique>>
+    password_hash
+    created_at
+    last_login
+    is_active
+}
+
+entity "UserProfile" as profile {
+    + profile_id <<PK>>
+    --
+    user_id <<FK>>
+    full_name
+    skill_level
+    preferred_tempo
+    preferred_key
+    practice_goals
+}
+
+' Sheet Music Management
+entity "SheetMusic" as sheet {
+    + sheet_id <<PK>>
+    --
+    title
+    pdf_path
+    audio_path
+    tempo
+    time_signature
+    level
+    key_signature
+    created_at
+    created_by <<FK>>
+}
+
+entity "PracticeSession" as session {
+    + session_id <<PK>>
+    --
+    user_id <<FK>>
+    sheet_id <<FK>>
+    start_time
+    end_time
+    duration
+    accuracy
+    completion_percentage
+    notes
+}
+
+entity "PracticeHistory" as history {
+    + history_id <<PK>>
+    --
+    session_id <<FK>>
+    timestamp
+    note_played
+    expected_note
+    accuracy
+    pitch_deviation
+}
+
+' Relationships with crow's foot notation
+user ||--o{ sheet : creates
+user ||--o{ session : performs
+user ||--|| profile : has
+sheet ||--o{ session : practiced in
+session ||--o{ history : contains
+
+' Notes
+note right of user
+  Stores user authentication
+  and basic information
+end note
+
+note right of profile
+  Contains user preferences
+  and learning goals
+end note
+
+note right of sheet
+  Stores sheet music metadata
+  and file paths
+end note
+
+note right of session
+  Records practice sessions
+  and overall performance
+end note
+
+note right of history
+  Tracks detailed note-by-note
+  performance data
+end note
+
+@enduml 

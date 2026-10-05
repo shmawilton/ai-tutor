@@ -1,0 +1,9 @@
+git clone https://github.com/ultralytics/yolov5.git
+cd yolov5
+pip install -r requirements.txt
+
+
+python train.py --img 416 --batch 16 --epochs 50 --data C:\Users\shmar\Desktop\learning_opencv\data.yaml --weights yolov5s.pt
+
+fine tuning
+python train.py --img 416 --batch 16 --epochs 100 --data C:/Users/shmar/Desktop/learning_opencv/data.yaml --weights C:/Users/shmar/Desktop/learning_opencv/yolov5/runs/train/exp2/weights/best.pt --freeze 10 --hyp C:/Users/shmar/Desktop/learning_opencv/hyp.finetune.yaml

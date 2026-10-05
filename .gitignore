@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Datasets (too large for GitHub - regenerate via crop_posture.py)
+data/raw/
+data/annotated/*.zip
+posture_data/
+train_data/
+
+# Runtime artifacts
+Tuner/temp_audio/
+Tuner/temp_sheets/
+*.cache
+*.cache.npy
+
+# Databases (binary, contain imported audio/PDF blobs)
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
