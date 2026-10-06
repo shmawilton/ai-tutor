@@ -17,12 +17,15 @@ from theme import C
 def analyze_reference(path):
     y = load_audio(path)
     times, f0 = track_pitch(y)
-    return {"notes": segment_notes(times, f0), "duration": len(y) / ANALYSIS_SR}
+    return {"notes": segment_notes(times, f0), "duration": len(y) / ANALYSIS_SR,
+            "track": (times, f0)}
 
 
 def analyze_performance(audio, sr, ref_notes, tempo):
     times, f0 = track_pitch(audio, sr)
-    return evaluate_performance(ref_notes, segment_notes(times, f0), len(audio) / sr, tempo)
+    result = evaluate_performance(ref_notes, segment_notes(times, f0), len(audio) / sr, tempo)
+    result["take_track"] = (times, f0)
+    return result
 
 
 class Worker(QThread):
@@ -122,6 +125,140 @@ class HistoryChart(QWidget):
             p.drawEllipse(QPointF(x, y(v)), 3.5, 3.5)
 
 
+def _voiced_segments(track):
+    """(times, f0) -> list of voiced runs as [(t, midi), ...], broken at gaps."""
+    times, f0 = track
+    if len(times) < 2:
+        return []
+    hop = float(times[1] - times[0])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        midi = 69.0 + 12.0 * np.log2(np.asarray(f0, dtype=float) / 440.0)
+    runs, pts, prev_t = [], [], None
+    for t, v in zip(times, midi):
+        gap = prev_t is not None and t - prev_t > hop * 4
+        if np.isfinite(v) and not gap:
+            pts.append(QPointF(t, v))
+        else:
+            if len(pts) > 1:
+                runs.append(pts)
+            pts = [QPointF(t, v)] if np.isfinite(v) else []
+        prev_t = t
+    if len(pts) > 1:
+        runs.append(pts)
+    return runs
+
+
+class CompareChart(QWidget):
+    """Pitch track of your recorded take (accent) vs the reference (faint)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ref = None
+        self._take = None
+        self.setMinimumHeight(92)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        theme.on_change(self.update)
+
+    def set_tracks(self, ref, take):
+        self._ref, self._take = ref, take
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(C["card_edge"]), 1))
+        p.setBrush(QColor(C["card"]))
+        p.drawRoundedRect(rect, 10, 10)
+        p.setPen(QColor(C["subtext"]))
+        p.drawText(QRectF(rect.left() + 10, rect.top() + 4,
+                          rect.width() - 20, 16), Qt.AlignLeft,
+                   "Take vs reference")
+        body = QRectF(rect.left() + 8, rect.top() + 20,
+                      rect.width() - 16, rect.height() - 26)
+        ref_runs = _voiced_segments(self._ref) if self._ref else []
+        take_runs = _voiced_segments(self._take) if self._take else []
+        if not take_runs:
+            p.setPen(QColor(C["faint"]))
+            p.drawText(body, Qt.AlignCenter,
+                       "Play a take to compare with the reference")
+            return
+        vals = [pt.y() for run in ref_runs + take_runs for pt in run]
+        lo, hi = min(vals) - 0.5, max(vals) + 0.5
+        tmax = max(pt.x() for run in ref_runs + take_runs for pt in run)
+
+        def pt2q(pt):
+            x = body.left() + (pt.x() / tmax) * body.width() if tmax else body.left()
+            y = body.bottom() - (pt.y() - lo) / (hi - lo) * body.height()
+            return QPointF(x, y)
+
+        for runs, color, width in ((ref_runs, C["faint"], 1.4),
+                                   (take_runs, C["accent"], 2.2)):
+            p.setPen(QPen(QColor(color), width, Qt.SolidLine,
+                          Qt.RoundCap, Qt.RoundJoin))
+            for run in runs:
+                p.drawPolyline(QPolygonF([pt2q(q) for q in run]))
+
+
+class IntonationChart(QWidget):
+    """All-time average cents deviation per note — your intonation tendencies."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rows = []
+        self.setMinimumHeight(110)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        theme.on_change(self.update)
+
+    def set_rows(self, rows):
+        self.rows = rows
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(C["card_edge"]), 1))
+        p.setBrush(QColor(C["card"]))
+        p.drawRoundedRect(rect, 10, 10)
+        p.setPen(QColor(C["subtext"]))
+        p.drawText(QRectF(rect.left() + 10, rect.top() + 4,
+                          rect.width() - 20, 16), Qt.AlignLeft,
+                   "Intonation profile (all-time avg ¢)")
+        body = QRectF(rect.left() + 8, rect.top() + 20,
+                      rect.width() - 16, rect.height() - 26)
+        if not self.rows:
+            p.setPen(QColor(C["faint"]))
+            p.drawText(body, Qt.AlignCenter,
+                       "Long tones and takes build this profile")
+            return
+        n = len(self.rows)
+        row_h = min(18.0, body.height() / n)
+        label_w, value_w = 34.0, 34.0
+        bar = QRectF(body.left() + label_w, body.top(),
+                     body.width() - label_w - value_w, row_h)
+        cx = bar.left() + bar.width() / 2
+        for i, row in enumerate(self.rows):
+            y = body.top() + i * row_h
+            avg = row["avg_cents"]
+            half = bar.width() / 2
+            w = min(half, abs(avg) / 30.0 * half)
+            color = (C["green"] if abs(avg) <= 5
+                     else C["amber"] if abs(avg) <= 15 else C["red"])
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(color))
+            p.drawRect(QRectF(cx if avg >= 0 else cx - w, y + row_h * 0.22,
+                              w, row_h * 0.56))
+            p.setPen(QColor(C["text"]))
+            p.drawText(QRectF(body.left(), y, label_w - 4, row_h),
+                       Qt.AlignLeft | Qt.AlignVCenter, midi_to_name(row["midi"]))
+            p.setPen(QColor(C["subtext"]))
+            p.drawText(QRectF(bar.right(), y, value_w, row_h),
+                       Qt.AlignRight | Qt.AlignVCenter, f"{avg:+.0f}¢")
+            p.setPen(QPen(QColor(C["card_edge"]), 1))
+            p.drawLine(QPointF(cx, y), QPointF(cx, y + row_h))
+
+
 class PracticePanel(QWidget):
     session_saved = Signal(int)
 
@@ -135,12 +272,18 @@ class PracticePanel(QWidget):
         self.tempo, self.beats = 120, 4
         self.state = "idle"
         self._cache, self._workers = {}, []
+        self._profile_obs = []
+        self._take = None
         self.player = AudioPlayer(self)
         self.player.finished.connect(self._update_reference_ui)
+        self.take_player = AudioPlayer(self)
         self.mic = MicrophoneStream()
 
         self.ref_button = QPushButton("▶  Play reference")
         self.ref_button.clicked.connect(self.toggle_reference)
+        self.take_button = QPushButton("▶  Play take")
+        self.take_button.setEnabled(False)
+        self.take_button.clicked.connect(self._play_take)
         self.ref_time = QLabel("0:00 / 0:00")
         self.practice_button = QPushButton("●  Start practice")
         self.practice_button.setObjectName("practice")
@@ -174,9 +317,12 @@ class PracticePanel(QWidget):
         self.sessions = QListWidget()
         self.sessions.setMaximumHeight(150)
         self.sessions.itemSelectionChanged.connect(self._show_selected_session)
+        self.compare = CompareChart()
+        self.profile_chart = IntonationChart()
 
         ref_row = QHBoxLayout()
         ref_row.addWidget(self.ref_button, 1)
+        ref_row.addWidget(self.take_button, 1)
         ref_row.addWidget(self.ref_time)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -189,9 +335,11 @@ class PracticePanel(QWidget):
         layout.addWidget(self.progress)
         layout.addLayout(grid)
         layout.addWidget(self.detail)
+        layout.addWidget(self.compare)
         layout.addWidget(self.history)
         layout.addWidget(self.history_chart)
         layout.addWidget(self.sessions)
+        layout.addWidget(self.profile_chart)
         layout.addStretch()
 
         theme.restyle(self._style)
@@ -254,6 +402,10 @@ class PracticePanel(QWidget):
         self._update_reference_ui()
         self._show_result(None)
         self.refresh_history()
+        self.refresh_profile()
+        self._take = None
+        self.take_button.setEnabled(False)
+        self.compare.set_tracks(None, None)
 
         cached = self._cache.get(sheet.db_id)
         if cached:
@@ -351,6 +503,10 @@ class PracticePanel(QWidget):
         self._t0 = time.monotonic()
         self._voiced = self._matched = 0
         self._streak = 0
+        self._profile_obs = []
+        self._take = None
+        self.take_button.setEnabled(False)
+        self.compare.set_tracks(None, None)
         self._live_timer.start()
         self._enc_timer.start()
 
@@ -377,6 +533,7 @@ class PracticePanel(QWidget):
             self.live_note.setText(midi_to_name(midi))
             self._set_live_note_color(C["green"] if ok else C["text"])
             cents = f"{(m - midi) * 100:+.0f}¢"
+            self._profile_obs.append((midi, (m - midi) * 100))
         else:
             self.live_note.setText("…")
             self._set_live_note_color(C["faint"])
@@ -390,6 +547,7 @@ class PracticePanel(QWidget):
         self._live_timer.stop()
         audio, sr = self.mic.recorded(), self.mic.samplerate
         self.mic.stop()
+        self._take = (audio.copy(), sr)
         if audio.size < sr:
             self.stop_all()
             self.info.setText("Recording too short — play at least a few notes.")
@@ -415,6 +573,18 @@ class PracticePanel(QWidget):
             self.db.add_practice_session(sheet_id, result)
         except Exception as e:
             self.info.setText(f"Could not save session: {e}")
+        try:
+            self.db.add_note_observations(self._profile_obs)
+        except Exception:
+            pass
+        self._profile_obs = []
+        if self._take is not None:
+            self.take_button.setEnabled(True)
+        if result and result.get("take_track") is not None:
+            self.compare.set_tracks(
+                self.reference.get("track") if self.reference else None,
+                result["take_track"])
+        self.refresh_profile()
         if self.sheet is not None and self.sheet.db_id == sheet_id:
             self._show_result(result)
             self.refresh_history()
@@ -433,13 +603,16 @@ class PracticePanel(QWidget):
         for key in ("intonation", "rhythm", "completion"):
             self.tiles[key].set(f"{r[key]:.0f}%", score_color(r[key]))
         self.tiles["tempo"].set(f"{r['played_tempo']:.0f}" if r["played_tempo"] else "--")
-        mean_cents = r["mean_cents"]
+        mean_cents = r["mean_cents"] or 0.0
         pitch = ("on pitch" if abs(mean_cents) < 3
                  else f"{mean_cents:+.0f}¢ {'sharp' if mean_cents > 0 else 'flat'}")
+        def cnt(key):
+            v = r.get(key)
+            return "–" if v is None else str(v)
         self.detail.setText(
             f"Played {r['notes_played']} notes in {fmt_time(r['duration'])} • "
-            f"missed {r.get('notes_missed', '–')} • extra {r.get('extra_notes', '–')} • "
-            f"octave errors {r.get('octave_errors', '–')} • average pitch {pitch}")
+            f"missed {cnt('notes_missed')} • extra {cnt('extra_notes')} • "
+            f"octave errors {cnt('octave_errors')} • average pitch {pitch}")
         self.live_note.setText(f"{r['accuracy']:.0f}%")
         self._set_live_note_color(score_color(r["accuracy"]))
         self.live_detail.setText("Session saved")
@@ -483,6 +656,16 @@ class PracticePanel(QWidget):
         if rows and self.sessions.currentRow() < 0:
             self.sessions.setCurrentRow(0)
 
+    def refresh_profile(self):
+        try:
+            self.profile_chart.set_rows(self.db.get_note_profile())
+        except Exception:
+            self.profile_chart.set_rows([])
+
+    def _play_take(self):
+        if self._take is not None:
+            self.take_player.play_array(*self._take)
+
     def _encourage(self):
         if self.coach is not None and self.state == "recording":
             self.coach.practice_mid()
@@ -491,6 +674,7 @@ class PracticePanel(QWidget):
         self._click_timer.stop()
         self._live_timer.stop()
         self._enc_timer.stop()
+        self.take_player.stop()
         if self.coach is not None:
             self.coach.practice_stopped()
         self.mic.stop()
@@ -511,6 +695,10 @@ class PracticePanel(QWidget):
         self.history.setText("")
         self.history_chart.set_points([])
         self.sessions.clear()
+        self.compare.set_tracks(None, None)
+        self._take = None
+        self.take_button.setEnabled(False)
+        self.refresh_profile()
         self.info.setText("Select a piece to begin")
         self._set_enabled(False)
         self._update_reference_ui()

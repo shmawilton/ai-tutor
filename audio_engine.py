@@ -143,7 +143,9 @@ class TunerEngine:
         else:
             self._pending_count = self._pending_count + 1 if self._pending == nearest else 1
             self._pending = nearest
-            if self._pending_count >= 2:
+            # flute overtones cause octave flicker — hold the line longer
+            need = 4 if abs(nearest - self._note) == 12 else 2
+            if self._pending_count >= need:
                 self._note, self._pending, self._pending_count = nearest, None, 0
 
         written = self._note + self.transpose
@@ -192,6 +194,11 @@ class AudioPlayer(QObject):
         except Exception:
             import librosa
             self.data, self.samplerate = librosa.load(path, sr=None, mono=True)
+
+    def play_array(self, data, samplerate):
+        """Play raw samples directly (e.g. a recorded practice take)."""
+        self.data, self.samplerate = np.asarray(data, dtype=np.float32), samplerate
+        self.play()
 
     def play(self):
         if self.data is None:

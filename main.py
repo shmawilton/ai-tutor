@@ -10,6 +10,7 @@ from camera_service import CameraService, VideoView
 from tuner_widget import TunerWidget
 from metronome_widget import MetronomeWidget
 from voice_coach import VoiceCoach
+from database.sheet_music_db import SheetMusicDatabase
 import theme
 from theme import C
 
@@ -70,7 +71,7 @@ class MainTab(QWidget):
         tuner_label = QLabel("Tuner")
         self._labels.append(tuner_label)
         right_layout.addWidget(tuner_label)
-        self.tuner_window = TunerWidget(coach=coach)
+        self.tuner_window = TunerWidget(coach=coach, db=SheetMusicDatabase())
         right_layout.addWidget(self.tuner_window)
         self.metronome = MetronomeWidget()
         right_layout.addWidget(self.metronome)

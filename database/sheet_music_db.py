@@ -31,6 +31,13 @@ class SheetMusicDatabase:
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS note_profile (
+                    midi INTEGER PRIMARY KEY,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    cents_sum REAL NOT NULL DEFAULT 0
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS practice_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sheet_id INTEGER NOT NULL,
@@ -44,11 +51,20 @@ class SheetMusicDatabase:
                     notes_expected INTEGER,
                     notes_played INTEGER,
                     notes_correct INTEGER,
+                    notes_missed INTEGER,
+                    extra_notes INTEGER,
+                    octave_errors INTEGER,
                     mean_cents REAL,
                     played_tempo REAL,
                     FOREIGN KEY (sheet_id) REFERENCES sheet_music (id)
                 )
             ''')
+            cursor.execute('PRAGMA table_info(practice_sessions)')
+            existing = {row[1] for row in cursor.fetchall()}
+            for col in ("notes_missed", "extra_notes", "octave_errors"):
+                if col not in existing:
+                    cursor.execute(
+                        f"ALTER TABLE practice_sessions ADD COLUMN {col} INTEGER")
             conn.commit()
     
     def add_sheet_music(self, title, tempo, time_signature, level, key_signature, pdf_path, audio_path):
@@ -126,7 +142,8 @@ class SheetMusicDatabase:
             return cursor.rowcount > 0
 
     SESSION_FIELDS = ("duration", "accuracy", "note_accuracy", "intonation", "rhythm", "completion",
-                      "notes_expected", "notes_played", "notes_correct", "mean_cents", "played_tempo")
+                      "notes_expected", "notes_played", "notes_correct", "notes_missed",
+                      "extra_notes", "octave_errors", "mean_cents", "played_tempo")
 
     def add_practice_session(self, sheet_id, metrics):
         """Store the results of one practice session."""
@@ -150,6 +167,36 @@ class SheetMusicDatabase:
                 "FROM practice_sessions WHERE sheet_id = ? "
                 "ORDER BY practiced_at DESC, id DESC LIMIT ?", (sheet_id, limit))
             return [dict(zip(keys, row)) for row in cursor.fetchall()]
+
+    def add_note_observations(self, observations):
+        """Merge (midi, cents) observations into the all-time intonation profile."""
+        agg = {}
+        for midi, cents in observations:
+            m = int(midi)
+            n, s = agg.get(m, (0, 0.0))
+            agg[m] = (n + 1, s + float(cents))
+        if not agg:
+            return
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.executemany(
+                "INSERT INTO note_profile (midi, count, cents_sum) VALUES (?, ?, ?) "
+                "ON CONFLICT(midi) DO UPDATE SET count = count + excluded.count, "
+                "cents_sum = cents_sum + excluded.cents_sum",
+                [(m, n, s) for m, (n, s) in agg.items()])
+            conn.commit()
+
+    def get_note_profile(self):
+        """All-time per-note intonation: [{midi, count, avg_cents}] low to high."""
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT midi, count, cents_sum / count FROM note_profile "
+                    "WHERE count >= 8 ORDER BY midi")
+                return [{"midi": m, "count": n, "avg_cents": avg}
+                        for m, n, avg in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
 
     def get_practice_stats(self, sheet_id):
         """Aggregate practice statistics for a sheet."""

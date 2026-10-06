@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, 
 
 from audio_engine import TunerEngine, ToneGenerator, TEMPERAMENTS, TRANSPOSITIONS
 from pitch_analysis import NOTE_NAMES
+from fingering import FingeringView
 import theme
 from theme import C
 
@@ -195,17 +196,20 @@ class PitchTrace(QWidget):
 
 
 class TunerWidget(QWidget):
-    def __init__(self, coach=None, parent=None):
+    def __init__(self, coach=None, db=None, parent=None):
         super().__init__(parent)
         self.engine = TunerEngine()
         self.drone = ToneGenerator()
         self.coach = coach
+        self.db = db
         self._session = []
         self._notes = set()
         self._streak = 0.0
         self._best_streak = 0.0
         self._last_tick = time.monotonic()
         self._auto_follow = 0.0
+        self._last_fingering = None
+        self._lt = None
         self.meter = TunerMeter()
         self.trace = PitchTrace()
 
@@ -227,11 +231,17 @@ class TunerWidget(QWidget):
         self.hold_button = QPushButton("Hold")
         self.hold_button.setCheckable(True)
         self.hold_button.setObjectName("secondary")
+        self.lt_button = QPushButton("LT")
+        self.lt_button.setCheckable(True)
+        self.lt_button.setObjectName("secondary")
+        self.lt_button.setToolTip("Long tone: hold one note, get a steadiness score")
+        self.lt_button.toggled.connect(self._toggle_lt)
 
         controls = QHBoxLayout()
         controls.addWidget(self.toggle_button, 2)
         controls.addWidget(self.a4_spin, 1)
         controls.addWidget(self.hold_button)
+        controls.addWidget(self.lt_button)
 
         self.tol_spin = QSpinBox(minimum=2, maximum=20, value=IN_TUNE_CENTS,
                                  prefix="±", suffix="¢")
@@ -288,6 +298,21 @@ class TunerWidget(QWidget):
         drone_row.addWidget(self.drone_auto)
         drone_row.addWidget(self.drone_vol, 2)
 
+        self.fingering = FingeringView("flute")
+        chart_button = QPushButton("Chart")
+        chart_button.setObjectName("secondary")
+        chart_button.clicked.connect(self.fingering.show_full_chart)
+        trill_button = QPushButton("Trills")
+        trill_button.setObjectName("secondary")
+        trill_button.clicked.connect(self.fingering.show_trill_chart)
+        fing_side = QVBoxLayout()
+        fing_side.addWidget(chart_button)
+        fing_side.addWidget(trill_button)
+        fing_side.addStretch(1)
+        fing_row = QHBoxLayout()
+        fing_row.addWidget(self.fingering, 1)
+        fing_row.addLayout(fing_side)
+
         self.stats = QLabel("")
         self.stats.setAlignment(Qt.AlignCenter)
         self.stats.setWordWrap(True)
@@ -305,6 +330,7 @@ class TunerWidget(QWidget):
         layout.addLayout(controls)
         layout.addLayout(settings)
         layout.addLayout(settings2)
+        layout.addLayout(fing_row)
         layout.addLayout(drone_row)
         layout.addWidget(self.status)
 
@@ -376,6 +402,9 @@ class TunerWidget(QWidget):
             self._session.clear()
             self._notes.clear()
             self._streak = self._best_streak = 0.0
+            self._lt = None
+            self._last_fingering = None
+            self.fingering.set_note(None, "")
             self.trace.clear()
             self.toggle_button.setText("Pause")
             self.status.setText("Listening…")
@@ -410,12 +439,30 @@ class TunerWidget(QWidget):
             self.trace.push(reading["cents"])
             self._session.append(reading["cents"])
             self._notes.add(reading["note"])
-            if abs(reading["cents"]) <= self.meter.tolerance:
+            if reading["midi"] != self._last_fingering:
+                self._last_fingering = reading["midi"]
+                self.fingering.set_note(
+                    reading["midi"], f"{reading['note']}{reading['octave']}")
+            if self.lt_button.isChecked():
+                if self._lt is None:
+                    self._lt = {"midi": reading["midi"],
+                                "name": f"{reading['note']}{reading['octave']}",
+                                "t": 0.0, "cents": []}
+                if reading["midi"] == self._lt["midi"]:
+                    self._lt["t"] += dt
+                    self._lt["cents"].append(reading["cents"])
+                if len(self._lt["cents"]) > 4:
+                    c = np.array(self._lt["cents"])
+                    steady = 100 * np.mean(np.abs(c) <= self.meter.tolerance)
+                    self.stats.setText(
+                        f"Long tone {self._lt['name']}: {self._lt['t']:.1f}s • "
+                        f"{c.mean():+.0f}¢ • ±{c.std():.0f}¢ • steady {steady:.0f}%")
+            elif abs(reading["cents"]) <= self.meter.tolerance:
                 self._streak += dt
                 self._best_streak = max(self._best_streak, self._streak)
             else:
                 self._streak = 0.0
-            if len(self._session) > 10 and len(self._session) % 12 == 0:
+            if self._lt is None and len(self._session) > 10 and len(self._session) % 12 == 0:
                 cents = np.array(self._session)
                 in_tune = 100 * np.mean(np.abs(cents) <= self.meter.tolerance)
                 self.stats.setText(
@@ -436,8 +483,28 @@ class TunerWidget(QWidget):
         if self.coach is not None:
             self.coach.on_reading(reading, self.engine.level_db())
 
+    def _toggle_lt(self, on):
+        if on:
+            self._lt = None
+            self.status.setText("Long tone: play and hold a note")
+            return
+        if self._lt and self._lt["cents"]:
+            c = np.array(self._lt["cents"])
+            steady = 100 * np.mean(np.abs(c) <= self.meter.tolerance)
+            if self.db is not None:
+                try:
+                    self.db.add_note_observations(
+                        [(self._lt["midi"], v) for v in self._lt["cents"]])
+                except Exception as e:
+                    print(f"Profile save failed: {e}")
+            self.stats.setText(
+                f"Long tone {self._lt['name']} done: {self._lt['t']:.1f}s • "
+                f"steady {steady:.0f}% — saved to profile")
+        self._lt = None
+
     def stop_all(self):
         """Stop tuner and drone (e.g. when leaving the tab)."""
+        self.lt_button.setChecked(False)
         self.toggle_button.setChecked(False)
         self.drone_button.setChecked(False)
 
