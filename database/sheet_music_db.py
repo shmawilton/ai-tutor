@@ -140,6 +140,17 @@ class SheetMusicDatabase:
             conn.commit()
             return cursor.lastrowid
 
+    def get_practice_sessions(self, sheet_id, limit=200):
+        """Return every stored session for a sheet, newest first."""
+        keys = ("id", "practiced_at") + self.SESSION_FIELDS
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT id, practiced_at, {', '.join(self.SESSION_FIELDS)} "
+                "FROM practice_sessions WHERE sheet_id = ? "
+                "ORDER BY practiced_at DESC, id DESC LIMIT ?", (sheet_id, limit))
+            return [dict(zip(keys, row)) for row in cursor.fetchall()]
+
     def get_practice_stats(self, sheet_id):
         """Aggregate practice statistics for a sheet."""
         with sqlite3.connect(str(self.db_path)) as conn:

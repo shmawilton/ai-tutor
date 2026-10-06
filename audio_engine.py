@@ -153,6 +153,8 @@ class TunerEngine:
             "midi": self._note,
             "note": NOTE_NAMES[written % 12],
             "octave": written // 12 - 1,
+            "concert": (NOTE_NAMES[self._note % 12] + str(self._note // 12 - 1)
+                        if self.transpose else None),
             "cents": max(-50.0, min(50.0, (smooth - self._note) * 100.0 - self.offset(self._note))),
         }
 

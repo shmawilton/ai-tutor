@@ -1,13 +1,17 @@
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
-                               QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QRectF, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QProgressBar, QPushButton, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
 from audio_engine import AudioPlayer, MicrophoneStream, play_click
 from pitch_analysis import (ANALYSIS_SR, detect_pitch, evaluate_performance, freq_to_midi,
                             load_audio, midi_to_name, segment_notes, track_pitch)
+import theme
+from theme import C
 
 
 def analyze_reference(path):
@@ -41,22 +45,27 @@ class StatTile(QFrame):
         super().__init__(parent)
         self.setObjectName("tile")
         self._size = 26 if big else 16
+        self._color = C["text"]
         self.value = QLabel("--")
         self.value.setAlignment(Qt.AlignCenter)
-        self.value.setStyleSheet(f"font-size:{self._size}px; font-weight:bold; color:#2c3e50;")
-        caption_label = QLabel(caption)
-        caption_label.setWordWrap(True)
-        caption_label.setAlignment(Qt.AlignCenter)
-        caption_label.setStyleSheet("font-size:11px; color:#7f8c8d;")
+        self.caption_label = QLabel(caption)
+        self.caption_label.setWordWrap(True)
+        self.caption_label.setAlignment(Qt.AlignCenter)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(0)
         layout.addWidget(self.value)
-        layout.addWidget(caption_label)
+        layout.addWidget(self.caption_label)
+        theme.restyle(self._style)
 
-    def set(self, text, color="#2c3e50"):
-        self.value.setStyleSheet(f"font-size:{self._size}px; font-weight:bold; color:{color};")
-        self.value.setText(text)
+    def _style(self):
+        self.value.setStyleSheet(
+            f"font-size:{self._size}px; font-weight:bold; color:{self._color};")
+        self.caption_label.setStyleSheet(f"font-size:11px; color:{C['subtext']};")
+
+    def set(self, text, color=None):
+        self._color = color or C["text"]
+        self._style()
 
 
 def score_color(value):
@@ -68,12 +77,59 @@ def fmt_time(seconds):
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+class HistoryChart(QWidget):
+    """Accuracy trend across past sessions (oldest → newest, left → right)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.points = []
+        self.setMinimumHeight(84)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        theme.on_change(self.update)
+
+    def set_points(self, values):
+        self.points = [float(v) for v in values]
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(C["card_edge"]), 1))
+        p.setBrush(QColor(C["card"]))
+        p.drawRoundedRect(rect, 10, 10)
+        w = rect.width() - 16
+        left, right = rect.left() + 8, rect.right() - 8
+
+        def y(v):
+            return rect.bottom() - 8 - (v / 100.0) * (rect.height() - 16)
+
+        if not self.points:
+            p.setPen(QColor(C["faint"]))
+            p.drawText(rect, Qt.AlignCenter, "History builds as you practice")
+            return
+        p.setPen(QPen(QColor(C["tick_minor"]), 1, Qt.DashLine))
+        for v in (50, 80):
+            p.drawLine(QPointF(left, y(v)), QPointF(right, y(v)))
+        n = len(self.points)
+        xs = [left + (w * i / (n - 1) if n > 1 else w / 2) for i in range(n)]
+        if n >= 2:
+            p.setPen(QPen(QColor(C["accent"]), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPolyline(QPolygonF([QPointF(x, y(v)) for x, v in zip(xs, self.points)]))
+        p.setPen(Qt.NoPen)
+        for x, v in zip(xs, self.points):
+            p.setBrush(QColor(score_color(v)))
+            p.drawEllipse(QPointF(x, y(v)), 3.5, 3.5)
+
+
 class PracticePanel(QWidget):
     session_saved = Signal(int)
 
-    def __init__(self, db, parent=None):
+    def __init__(self, db, coach=None, parent=None):
         super().__init__(parent)
         self.db = db
+        self.coach = coach
+        self._streak = 0
         self.sheet = None
         self.reference = None
         self.tempo, self.beats = 120, 4
@@ -86,21 +142,18 @@ class PracticePanel(QWidget):
         self.ref_button = QPushButton("▶  Play reference")
         self.ref_button.clicked.connect(self.toggle_reference)
         self.ref_time = QLabel("0:00 / 0:00")
-        self.ref_time.setStyleSheet("color:#7f8c8d;")
         self.practice_button = QPushButton("●  Start practice")
         self.practice_button.setObjectName("practice")
         self.practice_button.clicked.connect(self.toggle_practice)
 
         self.info = QLabel("Select a piece to begin")
         self.info.setWordWrap(True)
-        self.info.setStyleSheet("color:#7f8c8d;")
         self.live_note = QLabel("–")
         self.live_note.setAlignment(Qt.AlignCenter)
-        self.live_note.setStyleSheet("font-size:34px; font-weight:bold; color:#2c3e50;")
+        self._live_note_color = C["text"]
         self.live_detail = QLabel("")
         self.live_detail.setWordWrap(True)
         self.live_detail.setAlignment(Qt.AlignCenter)
-        self.live_detail.setStyleSheet("color:#34495e;")
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(6)
@@ -115,10 +168,12 @@ class PracticePanel(QWidget):
             grid.addWidget(self.tiles[key], 1 + i // 3, i % 3)
         self.detail = QLabel("")
         self.detail.setWordWrap(True)
-        self.detail.setStyleSheet("color:#7f8c8d; font-size:11px;")
         self.history = QLabel("")
         self.history.setWordWrap(True)
-        self.history.setStyleSheet("color:#34495e; font-size:12px;")
+        self.history_chart = HistoryChart()
+        self.sessions = QListWidget()
+        self.sessions.setMaximumHeight(150)
+        self.sessions.itemSelectionChanged.connect(self._show_selected_session)
 
         ref_row = QHBoxLayout()
         ref_row.addWidget(self.ref_button, 1)
@@ -135,21 +190,45 @@ class PracticePanel(QWidget):
         layout.addLayout(grid)
         layout.addWidget(self.detail)
         layout.addWidget(self.history)
+        layout.addWidget(self.history_chart)
+        layout.addWidget(self.sessions)
         layout.addStretch()
 
-        self.setStyleSheet("""
-            QPushButton { background:#3498db; color:white; border:none; border-radius:8px;
-                          padding:9px; font-weight:bold; }
-            QPushButton:disabled { background:#dfe4ea; color:#95a5a6; }
-            QPushButton#practice { background:#27ae60; font-size:14px; padding:11px; }
-            QPushButton#practice:disabled { background:#dfe4ea; color:#95a5a6; }
-            QFrame#tile { background:#ffffff; border:1px solid #e1e4e8; border-radius:8px; }
-        """)
+        theme.restyle(self._style)
 
         self._ui_timer = QTimer(self, interval=100, timeout=self._update_reference_ui)
         self._click_timer = QTimer(self, timeout=self._tick)
         self._live_timer = QTimer(self, interval=50, timeout=self._live_update)
+        self._enc_timer = QTimer(self, interval=25000, timeout=self._encourage)
         self._set_enabled(False)
+
+    def _style(self):
+        self.setStyleSheet(theme.qss("""
+            QPushButton { background:$blue; color:white; border:none; border-radius:8px;
+                          padding:9px; font-weight:bold; }
+            QPushButton:disabled { background:$disabled_bg; color:$disabled_text; }
+            QPushButton#practice { background:$green; font-size:14px; padding:11px; }
+            QPushButton#practice:disabled { background:$disabled_bg; color:$disabled_text; }
+            QFrame#tile { background:$card; border:1px solid $card_edge; border-radius:8px; }
+            QProgressBar { border:1px solid $card_edge; border-radius:3px; background:$track; }
+            QProgressBar::chunk { background:$accent; border-radius:2px; }
+        """))
+        self.ref_time.setStyleSheet(f"color:{C['subtext']};")
+        self.info.setStyleSheet(f"color:{C['subtext']};")
+        self.live_detail.setStyleSheet(f"color:{C['text2']};")
+        self.detail.setStyleSheet(f"color:{C['subtext']}; font-size:11px;")
+        self.history.setStyleSheet(f"color:{C['text2']}; font-size:12px;")
+        self.sessions.setStyleSheet(theme.qss("""
+            QListWidget { background:$base; border:1px solid $card_edge; border-radius:6px;
+                          color:$text; font-size:12px; }
+            QListWidget::item { border-bottom:1px solid $card_edge; padding:4px 8px; }
+            QListWidget::item:selected { background:$select; border-left:3px solid $accent; }
+        """))
+        self._set_live_note_color(self._live_note_color)
+
+    def _set_live_note_color(self, color):
+        self._live_note_color = color
+        self.live_note.setStyleSheet(f"font-size:34px; font-weight:bold; color:{color};")
 
     def _set_enabled(self, ready):
         self.ref_button.setEnabled(self.player.data is not None)
@@ -247,6 +326,8 @@ class PracticePanel(QWidget):
         self._beats_left = self.beats
         self._click_timer.start(int(60000 / max(30, self.tempo)))
         self._tick()
+        if self.coach is not None:
+            self.coach.practice_started()
 
     def _tick(self):
         if self._beats_left <= 0:
@@ -269,7 +350,9 @@ class PracticePanel(QWidget):
         self.practice_button.setText("■  Stop && analyze")
         self._t0 = time.monotonic()
         self._voiced = self._matched = 0
+        self._streak = 0
         self._live_timer.start()
+        self._enc_timer.start()
 
     def _live_update(self):
         t = time.monotonic() - self._t0
@@ -288,13 +371,15 @@ class PracticePanel(QWidget):
             self._voiced += 1
             self._matched += int(np.any(self._ref_midis[window] == midi))
             ok = expected == midi_to_name(midi)
+            self._streak = self._streak + 1 if expected and not ok else 0
+            if self._streak == 25 and self.coach is not None:
+                self.coach.practice_wrong_streak()
             self.live_note.setText(midi_to_name(midi))
-            self.live_note.setStyleSheet(
-                f"font-size:34px; font-weight:bold; color:{'#27ae60' if ok else '#2c3e50'};")
+            self._set_live_note_color(C["green"] if ok else C["text"])
             cents = f"{(m - midi) * 100:+.0f}¢"
         else:
             self.live_note.setText("…")
-            self.live_note.setStyleSheet("font-size:34px; font-weight:bold; color:#95a5a6;")
+            self._set_live_note_color(C["faint"])
             cents = ""
         live = f" • following {100 * self._matched / self._voiced:.0f}%" if self._voiced else ""
         self.live_detail.setText(f"Expected: {expected or 'rest'}  {cents}{live}  •  {fmt_time(t)}")
@@ -333,12 +418,14 @@ class PracticePanel(QWidget):
         if self.sheet is not None and self.sheet.db_id == sheet_id:
             self._show_result(result)
             self.refresh_history()
+        if self.coach is not None:
+            self.coach.practice_done(result)
         self.session_saved.emit(sheet_id)
 
     def _show_result(self, r):
         if r is None:
             for tile in self.tiles.values():
-                tile.set("--", "#95a5a6")
+                tile.set("--", C["faint"])
             self.detail.setText("")
             return
         self.tiles["accuracy"].set(f"{r['accuracy']:.0f}%", score_color(r["accuracy"]))
@@ -350,16 +437,41 @@ class PracticePanel(QWidget):
         pitch = ("on pitch" if abs(mean_cents) < 3
                  else f"{mean_cents:+.0f}¢ {'sharp' if mean_cents > 0 else 'flat'}")
         self.detail.setText(
-            f"Played {r['notes_played']} notes in {fmt_time(r['duration'])} • missed {r['notes_missed']} • "
-            f"extra {r['extra_notes']} • octave errors {r['octave_errors']} • average pitch {pitch}")
+            f"Played {r['notes_played']} notes in {fmt_time(r['duration'])} • "
+            f"missed {r.get('notes_missed', '–')} • extra {r.get('extra_notes', '–')} • "
+            f"octave errors {r.get('octave_errors', '–')} • average pitch {pitch}")
         self.live_note.setText(f"{r['accuracy']:.0f}%")
-        self.live_note.setStyleSheet(f"font-size:34px; font-weight:bold; color:{score_color(r['accuracy'])};")
+        self._set_live_note_color(score_color(r["accuracy"]))
         self.live_detail.setText("Session saved")
+
+    def _show_selected_session(self):
+        item = self.sessions.currentItem()
+        if item is None or self.sheet is None:
+            return
+        row = item.data(Qt.UserRole)
+        self._show_result(row)
+        self.live_detail.setText(f"Session {str(row['practiced_at'])[:16]}")
+        self.live_detail.setStyleSheet(f"color:{C['subtext']};")
 
     def refresh_history(self):
         if not self.sheet:
             self.history.setText("")
+            self.history_chart.set_points([])
+            self.sessions.clear()
             return
+        try:
+            rows = self.db.get_practice_sessions(self.sheet.db_id)
+        except Exception:
+            rows = []
+        self.history_chart.set_points([r["accuracy"] for r in reversed(rows)])
+        self.sessions.blockSignals(True)
+        self.sessions.clear()
+        for row in rows:
+            item = QListWidgetItem(
+                f"{str(row['practiced_at'])[:16]}   ·   {(row['accuracy'] or 0):.0f}%")
+            item.setData(Qt.UserRole, row)
+            self.sessions.addItem(item)
+        self.sessions.blockSignals(False)
         s = self.db.get_practice_stats(self.sheet.db_id)
         if not s["sessions"]:
             self.history.setText("No practice sessions yet.")
@@ -368,10 +480,19 @@ class PracticePanel(QWidget):
             f"<b>History</b> — {s['sessions']} sessions • best {s['best_accuracy']:.0f}% • "
             f"last {s['last_accuracy']:.0f}% • avg {s['average_accuracy']:.0f}% • "
             f"total {fmt_time(s['total_time'])} • last practiced {str(s['last_practiced'])[:16]}")
+        if rows and self.sessions.currentRow() < 0:
+            self.sessions.setCurrentRow(0)
+
+    def _encourage(self):
+        if self.coach is not None and self.state == "recording":
+            self.coach.practice_mid()
 
     def stop_all(self):
         self._click_timer.stop()
         self._live_timer.stop()
+        self._enc_timer.stop()
+        if self.coach is not None:
+            self.coach.practice_stopped()
         self.mic.stop()
         self.player.stop()
         self.state = "idle"
@@ -388,6 +509,8 @@ class PracticePanel(QWidget):
         self.live_note.setText("–")
         self.live_detail.setText("")
         self.history.setText("")
+        self.history_chart.set_points([])
+        self.sessions.clear()
         self.info.setText("Select a piece to begin")
         self._set_enabled(False)
         self._update_reference_ui()

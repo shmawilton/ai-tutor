@@ -26,6 +26,8 @@ except ImportError:
 from database.sheet_music_db import SheetMusicDatabase
 from practice_panel import PracticePanel
 from camera_service import VideoView
+import theme
+from theme import C
 
 # Data container for sheet music metadata
 class SheetMusicData:
@@ -145,18 +147,19 @@ class SheetMusicListItem(QWidget):
         super().__init__(parent)
         self.sheet_data = sheet_data
 
+        self._labels = {}
         title_label = QLabel(sheet_data.title)
         title_label.setWordWrap(True)
-        title_label.setStyleSheet("font-size:13px; font-weight:bold; color:#2c3e50;")
+        self._labels["title"] = title_label
         level_label = QLabel(sheet_data.level)
         level_label.setStyleSheet(
             f"background:{self.LEVEL_COLORS.get(sheet_data.level, '#95a5a6')}; color:white;"
             "border-radius:4px; padding:1px 6px; font-size:10px;")
         meta_label = QLabel(f"{sheet_data.tempo} • {sheet_data.time_signature} • {sheet_data.key_signature}")
         meta_label.setWordWrap(True)
-        meta_label.setStyleSheet("font-size:11px; color:#7f8c8d;")
+        self._labels["meta"] = meta_label
         self.stats_label = QLabel()
-        self.stats_label.setStyleSheet("font-size:11px; color:#2980b9;")
+        theme.restyle(self._style)
 
         top_row = QHBoxLayout()
         top_row.addWidget(title_label, 1)
@@ -169,6 +172,12 @@ class SheetMusicListItem(QWidget):
         layout.addWidget(self.stats_label)
         self.set_stats(stats)
 
+    def _style(self):
+        self._labels["title"].setStyleSheet(
+            f"font-size:13px; font-weight:bold; color:{C['text']};")
+        self._labels["meta"].setStyleSheet(f"font-size:11px; color:{C['subtext']};")
+        self.stats_label.setStyleSheet(f"font-size:11px; color:{C['link']};")
+
     def set_stats(self, stats):
         if stats and stats.get("sessions"):
             self.stats_label.setText(f"Best {stats['best_accuracy']:.0f}% • {stats['sessions']} sessions")
@@ -176,7 +185,7 @@ class SheetMusicListItem(QWidget):
             self.stats_label.setText("Not practiced yet")
 
 class SheetMusicWidget(QWidget):
-    def __init__(self, camera_service=None, parent=None):
+    def __init__(self, camera_service=None, coach=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sheet Music Practice")
         self.resize(1300, 800)
@@ -184,6 +193,7 @@ class SheetMusicWidget(QWidget):
         self.min_scale_factor = 0.5
         self.max_scale_factor = 3.0
         self.camera_service = camera_service
+        self.coach = coach
         
         # Initialize database
         self.db = SheetMusicDatabase()
@@ -207,15 +217,30 @@ class SheetMusicWidget(QWidget):
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
     
+    def _style(self):
+        self.setStyleSheet(theme.qss("""
+            QPushButton, QToolButton { background:$btn_bg; color:$text; border:1px solid $border;
+                                       border-radius:6px; padding:6px 12px; font-weight:bold; }
+            QPushButton:hover, QToolButton:hover { background:$btn_hover; }
+            QPushButton:disabled { background:$disabled_bg; color:$disabled_text; }
+            QLabel { color:$text; }
+            QLabel#section { font-size:15px; font-weight:bold; color:$text; }
+        """))
+        self.list_widget.setStyleSheet(theme.qss("""
+            QListWidget { background:$base; border:1px solid $card_edge; border-radius:6px; }
+            QListWidget::item { border-bottom:1px solid $card_edge; color:$text; }
+            QListWidget::item:selected { background:$select; border-left:4px solid $accent; }
+        """))
+        self.scroll_area.setStyleSheet(theme.qss(
+            "QScrollArea { background:$sheet_bg; border:none; border-radius:6px; }"))
+        self.pages_widget.setStyleSheet(f"background:{C['sheet_bg']};")
+        self.placeholder.setStyleSheet(f"color:{C['subtext']}; font-size:14px; padding:40px;")
+        for label in getattr(self, "page_labels", []):
+            label.setStyleSheet(
+                f"background:{C['base']}; border:1px solid {C['page_edge']};")
+
     def _init_ui(self):
         """Initialize all UI components."""
-        self.setStyleSheet("""
-            QPushButton, QToolButton { background:#ffffff; color:#2c3e50; border:1px solid #cfd6dd;
-                                       border-radius:6px; padding:6px 12px; font-weight:bold; }
-            QPushButton:hover, QToolButton:hover { background:#eef2f5; }
-            QPushButton:disabled { background:#f4f6f8; color:#a4aeb8; }
-            QLabel#section { font-size:15px; font-weight:bold; color:#2c3e50; }
-        """)
 
         left_panel = QWidget()
         left_panel.setMinimumWidth(220)
@@ -233,11 +258,6 @@ class SheetMusicWidget(QWidget):
         left_layout.addLayout(header_row)
         
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("""
-            QListWidget { background:#ffffff; border:1px solid #dcdde1; border-radius:6px; }
-            QListWidget::item { border-bottom:1px solid #e1e4e8; }
-            QListWidget::item:selected { background:#d6eaf8; border-left:4px solid #3498db; }
-        """)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.currentRowChanged.connect(self.on_sheet_selected)
         left_layout.addWidget(self.list_widget, 1)
@@ -268,15 +288,12 @@ class SheetMusicWidget(QWidget):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("QScrollArea { background:#e5e8eb; border:none; border-radius:6px; }")
         self.pages_widget = QWidget()
-        self.pages_widget.setStyleSheet("background:#e5e8eb;")
         self.pages_layout = QVBoxLayout(self.pages_widget)
         self.pages_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         self.pages_layout.setSpacing(12)
         self.placeholder = QLabel("Import or select a piece from the library")
         self.placeholder.setAlignment(Qt.AlignCenter)
-        self.placeholder.setStyleSheet("color:#7f8c8d; font-size:14px; padding:40px;")
         self.pages_layout.addWidget(self.placeholder)
         self.scroll_area.setWidget(self.pages_widget)
         center_layout.addWidget(self.scroll_area, 1)
@@ -295,7 +312,7 @@ class SheetMusicWidget(QWidget):
         practice_label = QLabel("Practice")
         practice_label.setObjectName("section")
         right_layout.addWidget(practice_label)
-        self.practice_panel = PracticePanel(self.db)
+        self.practice_panel = PracticePanel(self.db, coach=self.coach)
         self.practice_panel.session_saved.connect(self._on_session_saved)
         right_layout.addWidget(self.practice_panel, 1)
         right_panel = QScrollArea()
@@ -317,6 +334,7 @@ class SheetMusicWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.splitter)
+        theme.restyle(self._style)
     
     def import_sheet_music(self):
         """Import new sheet music into the database."""
@@ -444,7 +462,8 @@ class SheetMusicWidget(QWidget):
                                      else "Install PyMuPDF (pip install pymupdf) to view PDFs")
         for _ in self.page_pixmaps:
             label = QLabel()
-            label.setStyleSheet("background:white; border:1px solid #d0d4d9;")
+            label.setStyleSheet(
+                f"background:{C['base']}; border:1px solid {C['page_edge']};")
             self.pages_layout.addWidget(label)
             self.page_labels.append(label)
         self.update_display()

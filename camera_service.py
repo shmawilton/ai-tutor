@@ -6,6 +6,9 @@ from PySide6.QtCore import QThread, Signal, Qt, QObject
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget, QVBoxLayout
 
+import theme
+from theme import C
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -150,11 +153,13 @@ class CameraService(QObject):
 class VideoView(QWidget):
     """Displays the shared camera feed scaled to fit (never cropped/zoomed)."""
 
-    STATUS_STYLES = {
-        "Correct": "background:#27ae60; color:white;",
-        "Incorrect": "background:#c0392b; color:white;",
-    }
-    NEUTRAL_STYLE = "background:#dfe4ea; color:#2c3e50;"
+    @staticmethod
+    def _chip(status):
+        if status == "Correct":
+            return f"background:{C['green']}; color:white;"
+        if status == "Incorrect":
+            return f"background:{C['red']}; color:white;"
+        return f"background:{C['neutral']}; color:{C['neutral_text']};"
 
     def __init__(self, service, show_status=True, parent=None):
         super().__init__(parent)
@@ -164,12 +169,12 @@ class VideoView(QWidget):
         self.video.setAlignment(Qt.AlignCenter)
         self.video.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.video.setMinimumSize(160, 120)
-        self.video.setStyleSheet("background:#e9ecef; color:#7f8c8d; border:1px solid #dfe4ea; border-radius:8px;")
 
         self.status = QLabel("Posture: --")
         self.status.setAlignment(Qt.AlignCenter)
-        self.status.setStyleSheet(f"{self.NEUTRAL_STYLE} border-radius:6px; padding:6px; font-weight:bold;")
         self.status.setVisible(show_status)
+        self._posture = "--"
+        theme.restyle(self._style)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -193,10 +198,17 @@ class VideoView(QWidget):
             self.video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.video.setPixmap(pix)
 
+    def _style(self):
+        self.video.setStyleSheet(
+            f"background:{C['video_bg']}; color:{C['subtext']}; "
+            f"border:1px solid {C['card_edge']}; border-radius:8px;")
+        self.status.setStyleSheet(
+            f"{self._chip(self._posture)} border-radius:6px; padding:6px; font-weight:bold;")
+
     def _on_posture(self, status):
+        self._posture = status
         self.status.setText(f"Posture: {status}")
-        style = self.STATUS_STYLES.get(status, self.NEUTRAL_STYLE)
-        self.status.setStyleSheet(f"{style} border-radius:6px; padding:6px; font-weight:bold;")
+        self._style()
 
     def _on_error(self, message):
         if self._last_image is None:
